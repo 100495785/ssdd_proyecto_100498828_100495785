@@ -1,4 +1,5 @@
-// server.c - Servidor de mensajería
+// server.c: Servidor TCP para sistema de mensajería
+
 #define _POSIX_C_SOURCE 200112L
 
 #include <arpa/inet.h>
@@ -20,8 +21,7 @@
 #define MAX_IP INET6_ADDRSTRLEN
 #define MAX_PORT_STR 16
 #define MAX_MESSAGE_LEN 256
-#define MAX_OPERATION_LEN 64
-#define MAX_ID_STR 32
+#define MAX_OPERATION 64
 
 typedef enum {
     USER_DISCONNECTED = 0,
@@ -166,14 +166,17 @@ static int send_byte_code(int fd, uint8_t code) {
     return send_all(fd, &code, sizeof(code));
 }
 
-static int send_cstring(int fd, const char *str) {
-    return send_all(fd, str, strlen(str) + 1);
+static int send_cstring(int fd, const char *text) {
+    size_t len;
+
+    if (text == NULL) {
+        return -1;
+    }
+
+    len = strlen(text) + 1;
+    return send_all(fd, text, len);
 }
 
-/*
- * Recibe una cadena terminada en '\0'.
- * Devuelve 0 si todo va bien, -1 si falla.
- */
 static int recv_cstring(int fd, char *buf, size_t buf_size) {
     size_t pos = 0;
 
@@ -183,6 +186,7 @@ static int recv_cstring(int fd, char *buf, size_t buf_size) {
 
     while (1) {
         char c;
+
         if (recv_all(fd, &c, 1) != 0) {
             return -1;
         }
@@ -201,7 +205,7 @@ static int recv_cstring(int fd, char *buf, size_t buf_size) {
     return 0;
 }
 
-static int connect_to_client_socket(const char *ip, const char *port_str) {
+static int connect_to_host(const char *ip, const char *port) {
     struct addrinfo hints;
     struct addrinfo *result = NULL;
     struct addrinfo *rp;
@@ -212,7 +216,7 @@ static int connect_to_client_socket(const char *ip, const char *port_str) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    rc = getaddrinfo(ip, port_str, &hints, &result);
+    rc = getaddrinfo(ip, port, &hints, &result);
     if (rc != 0) {
         return -1;
     }
@@ -235,14 +239,8 @@ static int connect_to_client_socket(const char *ip, const char *port_str) {
     return fd;
 }
 
-static int send_uint_as_cstring(int fd, unsigned int value) {
-    char buffer[MAX_ID_STR];
-    snprintf(buffer, sizeof(buffer), "%u", value);
-    return send_cstring(fd, buffer);
-}
-
 /* ===========================
- * Gestión de mensajes pendientes
+ * Gestión de usuarios/mensajes
  * =========================== */
 
 static void free_pending_messages(pending_message_t *head) {
@@ -255,6 +253,19 @@ static void free_pending_messages(pending_message_t *head) {
     }
 }
 
+static user_t *find_user_locked(const char *username) {
+    user_t *curr = g_users;
+
+    while (curr != NULL) {
+        if (strcmp(curr->username, username) == 0) {
+            return curr;
+        }
+        curr = curr->next;
+    }
+
+    return NULL;
+}
+
 static unsigned int next_message_id_for_sender(user_t *sender) {
     sender->last_message_id++;
 
@@ -265,15 +276,16 @@ static unsigned int next_message_id_for_sender(user_t *sender) {
     return sender->last_message_id;
 }
 
-static int enqueue_message_for_user(user_t *receiver,
-                                    const char *sender_name,
-                                    unsigned int msg_id,
-                                    const char *text) {
+static int add_pending_message_locked(user_t *receiver,
+                                      const char *sender_name,
+                                      unsigned int msg_id,
+                                      const char *text) {
     pending_message_t *msg = (pending_message_t *)malloc(sizeof(pending_message_t));
     if (msg == NULL) {
         return -1;
     }
 
+    memset(msg, 0, sizeof(pending_message_t));
     msg->id = msg_id;
 
     strncpy(msg->sender, sender_name, sizeof(msg->sender) - 1);
@@ -295,61 +307,44 @@ static int enqueue_message_for_user(user_t *receiver,
     return 0;
 }
 
-static void remove_pending_message_by_key(user_t *user,
-                                          const char *sender,
-                                          unsigned int id,
-                                          const char *text) {
+static int remove_pending_message_locked(user_t *receiver,
+                                         unsigned int msg_id,
+                                         const char *sender_name) {
     pending_message_t *curr;
     pending_message_t *prev = NULL;
 
-    if (user == NULL || sender == NULL || text == NULL) {
-        return;
+    if (receiver == NULL) {
+        return -1;
     }
 
-    curr = user->pending_head;
+    curr = receiver->pending_head;
     while (curr != NULL) {
-        if (curr->id == id &&
-            strcmp(curr->sender, sender) == 0 &&
-            strcmp(curr->text, text) == 0) {
-
-            if (prev == NULL) {
-                user->pending_head = curr->next;
-            } else {
-                prev->next = curr->next;
-            }
-
-            if (user->pending_tail == curr) {
-                user->pending_tail = prev;
-            }
-
-            free(curr);
-            return;
+        if (curr->id == msg_id && strcmp(curr->sender, sender_name) == 0) {
+            break;
         }
-
         prev = curr;
         curr = curr->next;
     }
-}
 
-/* ===========================
- * Gestión de usuarios
- * =========================== */
-
-static user_t *find_user_locked(const char *username) {
-    user_t *curr = g_users;
-
-    while (curr != NULL) {
-        if (strcmp(curr->username, username) == 0) {
-            return curr;
-        }
-        curr = curr->next;
+    if (curr == NULL) {
+        return -1;
     }
 
-    return NULL;
+    if (prev == NULL) {
+        receiver->pending_head = curr->next;
+    } else {
+        prev->next = curr->next;
+    }
+
+    if (receiver->pending_tail == curr) {
+        receiver->pending_tail = prev;
+    }
+
+    free(curr);
+    return 0;
 }
 
-/*
- * REGISTER:
+/* REGISTER:
  *  0 -> éxito
  *  1 -> ya existe
  * -1 -> error interno
@@ -395,8 +390,7 @@ static int register_user_internal(const char *username) {
     return 0;
 }
 
-/*
- * UNREGISTER:
+/* UNREGISTER:
  *  0 -> éxito
  *  1 -> no existe
  * -1 -> error interno
@@ -438,125 +432,28 @@ static int unregister_user_internal(const char *username) {
     return 0;
 }
 
-/*
- * CONNECT:
- *  0 -> éxito
- *  1 -> no existe
- *  2 -> ya conectado
- * -1 -> error interno
- */
-static int connect_user_internal(const char *username,
-                                 const char *ip,
-                                 const char *port) {
-    user_t *user;
-
-    if (username == NULL || ip == NULL || port == NULL) {
-        return -1;
-    }
-
-    pthread_mutex_lock(&g_users_mutex);
-
-    user = find_user_locked(username);
-    if (user == NULL) {
-        pthread_mutex_unlock(&g_users_mutex);
-        return 1;
-    }
-
-    if (user->state == USER_CONNECTED) {
-        pthread_mutex_unlock(&g_users_mutex);
-        return 2;
-    }
-
-    strncpy(user->ip, ip, sizeof(user->ip) - 1);
-    user->ip[sizeof(user->ip) - 1] = '\0';
-
-    strncpy(user->port, port, sizeof(user->port) - 1);
-    user->port[sizeof(user->port) - 1] = '\0';
-
-    user->state = USER_CONNECTED;
-
-    pthread_mutex_unlock(&g_users_mutex);
-    return 0;
-}
-
-/*
- * DISCONNECT:
- *  0 -> éxito
- *  1 -> no existe
- *  2 -> no conectado
- * -1 -> error interno / IP no coincide
- */
-static int disconnect_user_internal(const char *username, const char *request_ip) {
-    user_t *user;
-
-    if (username == NULL || request_ip == NULL) {
-        return -1;
-    }
-
-    pthread_mutex_lock(&g_users_mutex);
-
-    user = find_user_locked(username);
-    if (user == NULL) {
-        pthread_mutex_unlock(&g_users_mutex);
-        return 1;
-    }
-
-    if (user->state != USER_CONNECTED) {
-        pthread_mutex_unlock(&g_users_mutex);
-        return 2;
-    }
-
-    if (strcmp(user->ip, request_ip) != 0) {
-        pthread_mutex_unlock(&g_users_mutex);
-        return -1;
-    }
-
-    user->state = USER_DISCONNECTED;
-    user->ip[0] = '\0';
-    user->port[0] = '\0';
-
-    pthread_mutex_unlock(&g_users_mutex);
-    return 0;
-}
-
-static void mark_user_disconnected_internal(const char *username) {
-    user_t *user;
-
-    if (username == NULL) {
-        return;
-    }
-
-    pthread_mutex_lock(&g_users_mutex);
-
-    user = find_user_locked(username);
-    if (user != NULL) {
-        user->state = USER_DISCONNECTED;
-        user->ip[0] = '\0';
-        user->port[0] = '\0';
-    }
-
-    pthread_mutex_unlock(&g_users_mutex);
-}
-
 /* ===========================
- * Envío servidor -> cliente
+ * Envío/ACK
  * =========================== */
 
-static int deliver_message_to_user(const char *ip,
-                                   const char *port,
-                                   const char *sender,
-                                   unsigned int id,
-                                   const char *text) {
+static int deliver_message_to_endpoint(const char *ip,
+                                       const char *port,
+                                       const char *sender,
+                                       unsigned int msg_id,
+                                       const char *text) {
     int fd;
+    char id_str[32];
 
-    fd = connect_to_client_socket(ip, port);
+    fd = connect_to_host(ip, port);
     if (fd == -1) {
         return -1;
     }
 
+    snprintf(id_str, sizeof(id_str), "%u", msg_id);
+
     if (send_cstring(fd, "SEND MESSAGE") != 0 ||
         send_cstring(fd, sender) != 0 ||
-        send_uint_as_cstring(fd, id) != 0 ||
+        send_cstring(fd, id_str) != 0 ||
         send_cstring(fd, text) != 0) {
         close(fd);
         return -1;
@@ -566,258 +463,110 @@ static int deliver_message_to_user(const char *ip,
     return 0;
 }
 
-static int send_ack_to_sender(const char *ip,
-                              const char *port,
-                              unsigned int id) {
-    int fd;
-
-    fd = connect_to_client_socket(ip, port);
-    if (fd == -1) {
-        return -1;
-    }
-
-    if (send_cstring(fd, "SEND MESS ACK") != 0 ||
-        send_uint_as_cstring(fd, id) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    return 0;
-}
-
-static void try_deliver_pending_for_user(const char *receiver_name) {
-    while (1) {
-        char receiver_ip[MAX_IP];
-        char receiver_port[MAX_PORT_STR];
-        char sender_name[MAX_USERNAME];
-        char message_text[MAX_MESSAGE_LEN];
-        unsigned int msg_id;
-
-        bool sender_ack_connected = false;
-        char sender_ack_ip[MAX_IP];
-        char sender_ack_port[MAX_PORT_STR];
-
-        user_t *receiver;
-        user_t *sender;
-        pending_message_t *msg;
-
-        pthread_mutex_lock(&g_users_mutex);
-
-        receiver = find_user_locked(receiver_name);
-        if (receiver == NULL || receiver->state != USER_CONNECTED || receiver->pending_head == NULL) {
-            pthread_mutex_unlock(&g_users_mutex);
-            break;
-        }
-
-        msg = receiver->pending_head;
-
-        strncpy(receiver_ip, receiver->ip, sizeof(receiver_ip) - 1);
-        receiver_ip[sizeof(receiver_ip) - 1] = '\0';
-
-        strncpy(receiver_port, receiver->port, sizeof(receiver_port) - 1);
-        receiver_port[sizeof(receiver_port) - 1] = '\0';
-
-        strncpy(sender_name, msg->sender, sizeof(sender_name) - 1);
-        sender_name[sizeof(sender_name) - 1] = '\0';
-
-        strncpy(message_text, msg->text, sizeof(message_text) - 1);
-        message_text[sizeof(message_text) - 1] = '\0';
-
-        msg_id = msg->id;
-
-        sender = find_user_locked(sender_name);
-        if (sender != NULL && sender->state == USER_CONNECTED) {
-            sender_ack_connected = true;
-
-            strncpy(sender_ack_ip, sender->ip, sizeof(sender_ack_ip) - 1);
-            sender_ack_ip[sizeof(sender_ack_ip) - 1] = '\0';
-
-            strncpy(sender_ack_port, sender->port, sizeof(sender_ack_port) - 1);
-            sender_ack_port[sizeof(sender_ack_port) - 1] = '\0';
-        }
-
-        pthread_mutex_unlock(&g_users_mutex);
-
-        if (deliver_message_to_user(receiver_ip, receiver_port, sender_name, msg_id, message_text) != 0) {
-            mark_user_disconnected_internal(receiver_name);
-            break;
-        }
-
-        pthread_mutex_lock(&g_users_mutex);
-
-        receiver = find_user_locked(receiver_name);
-        if (receiver != NULL) {
-            remove_pending_message_by_key(receiver, sender_name, msg_id, message_text);
-        }
-
-        pthread_mutex_unlock(&g_users_mutex);
-
-        printf("s> SEND MESSAGE %u FROM %s TO %s\n", msg_id, sender_name, receiver_name);
-        fflush(stdout);
-
-        if (sender_ack_connected) {
-            (void)send_ack_to_sender(sender_ack_ip, sender_ack_port, msg_id);
-        }
-    }
-}
-
-/* ===========================
- * Operación SEND
- * =========================== */
-
-static int handle_send_store(const char *sender_name,
-                             const char *receiver_name,
-                             const char *text,
-                             unsigned int *assigned_id,
-                             bool *receiver_connected,
-                             char *receiver_ip,
-                             size_t receiver_ip_size,
-                             char *receiver_port,
-                             size_t receiver_port_size,
-                             bool *sender_ack_connected,
-                             char *sender_ack_ip,
-                             size_t sender_ack_ip_size,
-                             char *sender_ack_port,
-                             size_t sender_ack_port_size) {
+static void send_ack_to_sender_if_connected(const char *sender_name, unsigned int msg_id) {
     user_t *sender;
-    user_t *receiver;
-    unsigned int new_id;
-
-    if (sender_name == NULL || receiver_name == NULL || text == NULL ||
-        assigned_id == NULL || receiver_connected == NULL ||
-        receiver_ip == NULL || receiver_port == NULL ||
-        sender_ack_connected == NULL ||
-        sender_ack_ip == NULL || sender_ack_port == NULL) {
-        return -1;
-    }
+    char ip[MAX_IP];
+    char port[MAX_PORT_STR];
+    int fd;
+    char id_str[32];
 
     pthread_mutex_lock(&g_users_mutex);
 
     sender = find_user_locked(sender_name);
-    receiver = find_user_locked(receiver_name);
-
-    if (sender == NULL || receiver == NULL) {
+    if (sender == NULL || sender->state != USER_CONNECTED) {
         pthread_mutex_unlock(&g_users_mutex);
-        return 1;
-    }
-
-    new_id = next_message_id_for_sender(sender);
-
-    if (enqueue_message_for_user(receiver, sender_name, new_id, text) != 0) {
-        pthread_mutex_unlock(&g_users_mutex);
-        return -1;
-    }
-
-    *assigned_id = new_id;
-
-    *receiver_connected = (receiver->state == USER_CONNECTED);
-    if (*receiver_connected) {
-        strncpy(receiver_ip, receiver->ip, receiver_ip_size - 1);
-        receiver_ip[receiver_ip_size - 1] = '\0';
-
-        strncpy(receiver_port, receiver->port, receiver_port_size - 1);
-        receiver_port[receiver_port_size - 1] = '\0';
-    } else {
-        receiver_ip[0] = '\0';
-        receiver_port[0] = '\0';
-    }
-
-    *sender_ack_connected = (sender->state == USER_CONNECTED);
-    if (*sender_ack_connected) {
-        strncpy(sender_ack_ip, sender->ip, sender_ack_ip_size - 1);
-        sender_ack_ip[sender_ack_ip_size - 1] = '\0';
-
-        strncpy(sender_ack_port, sender->port, sender_ack_port_size - 1);
-        sender_ack_port[sender_ack_port_size - 1] = '\0';
-    } else {
-        sender_ack_ip[0] = '\0';
-        sender_ack_port[0] = '\0';
-    }
-
-    pthread_mutex_unlock(&g_users_mutex);
-    return 0;
-}
-
-/* ===========================
- * USERS
- * =========================== */
-
-static int count_connected_users_locked(void) {
-    int count = 0;
-    user_t *curr = g_users;
-
-    while (curr != NULL) {
-        if (curr->state == USER_CONNECTED) {
-            count++;
-        }
-        curr = curr->next;
-    }
-
-    return count;
-}
-
-static int fill_connected_users_locked(char ***out_names, int *out_count) {
-    user_t *curr;
-    char **names;
-    int count;
-    int i;
-
-    if (out_names == NULL || out_count == NULL) {
-        return -1;
-    }
-
-    count = count_connected_users_locked();
-    *out_count = count;
-
-    if (count == 0) {
-        *out_names = NULL;
-        return 0;
-    }
-
-    names = (char **)calloc((size_t)count, sizeof(char *));
-    if (names == NULL) {
-        return -1;
-    }
-
-    curr = g_users;
-    i = 0;
-    while (curr != NULL) {
-        if (curr->state == USER_CONNECTED) {
-            names[i] = (char *)malloc(strlen(curr->username) + 1);
-            if (names[i] == NULL) {
-                int j;
-                for (j = 0; j < i; ++j) {
-                    free(names[j]);
-                }
-                free(names);
-                return -1;
-            }
-            strcpy(names[i], curr->username);
-            i++;
-        }
-        curr = curr->next;
-    }
-
-    *out_names = names;
-    return 0;
-}
-
-static void free_name_array(char **names, int count) {
-    int i;
-
-    if (names == NULL) {
         return;
     }
 
-    for (i = 0; i < count; ++i) {
-        free(names[i]);
+    strncpy(ip, sender->ip, sizeof(ip) - 1);
+    ip[sizeof(ip) - 1] = '\0';
+
+    strncpy(port, sender->port, sizeof(port) - 1);
+    port[sizeof(port) - 1] = '\0';
+
+    pthread_mutex_unlock(&g_users_mutex);
+
+    fd = connect_to_host(ip, port);
+    if (fd == -1) {
+        return;
     }
-    free(names);
+
+    snprintf(id_str, sizeof(id_str), "%u", msg_id);
+
+    (void)send_cstring(fd, "SEND MESS ACK");
+    (void)send_cstring(fd, id_str);
+
+    close(fd);
+}
+
+static void deliver_pending_messages_for_user(const char *username) {
+    while (1) {
+        user_t *user;
+        pending_message_t *msg;
+        char target_ip[MAX_IP];
+        char target_port[MAX_PORT_STR];
+        unsigned int msg_id;
+        char sender[MAX_USERNAME];
+        char text[MAX_MESSAGE_LEN];
+
+        pthread_mutex_lock(&g_users_mutex);
+
+        user = find_user_locked(username);
+        if (user == NULL || user->state != USER_CONNECTED || user->pending_head == NULL) {
+            pthread_mutex_unlock(&g_users_mutex);
+            break;
+        }
+
+        msg = user->pending_head;
+
+        strncpy(target_ip, user->ip, sizeof(target_ip) - 1);
+        target_ip[sizeof(target_ip) - 1] = '\0';
+
+        strncpy(target_port, user->port, sizeof(target_port) - 1);
+        target_port[sizeof(target_port) - 1] = '\0';
+
+        msg_id = msg->id;
+
+        strncpy(sender, msg->sender, sizeof(sender) - 1);
+        sender[sizeof(sender) - 1] = '\0';
+
+        strncpy(text, msg->text, sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+
+        pthread_mutex_unlock(&g_users_mutex);
+
+        if (deliver_message_to_endpoint(target_ip, target_port, sender, msg_id, text) == 0) {
+            pthread_mutex_lock(&g_users_mutex);
+
+            user = find_user_locked(username);
+            if (user != NULL) {
+                (void)remove_pending_message_locked(user, msg_id, sender);
+            }
+
+            pthread_mutex_unlock(&g_users_mutex);
+
+            printf("s> SEND MESSAGE %u FROM %s TO %s\n", msg_id, sender, username);
+            fflush(stdout);
+
+            send_ack_to_sender_if_connected(sender, msg_id);
+        } else {
+            pthread_mutex_lock(&g_users_mutex);
+
+            user = find_user_locked(username);
+            if (user != NULL) {
+                user->state = USER_DISCONNECTED;
+                user->ip[0] = '\0';
+                user->port[0] = '\0';
+            }
+
+            pthread_mutex_unlock(&g_users_mutex);
+            break;
+        }
+    }
 }
 
 /* ===========================
- * Protocolo handlers
+ * Handlers de operaciones
  * =========================== */
 
 static void handle_register_operation(int client_fd) {
@@ -898,12 +647,12 @@ static void handle_unregister_operation(int client_fd) {
     fflush(stdout);
 }
 
-static void handle_connect_operation(int client_fd,
-                                     const struct sockaddr *client_sa) {
+static void handle_connect_operation(int client_fd, const struct sockaddr *client_sa) {
     char username[MAX_USERNAME];
     char port[MAX_PORT_STR];
     char ip[MAX_IP];
-    int rc;
+    user_t *user;
+    int rc = 3;
     uint8_t code;
 
     if (recv_cstring(client_fd, username, sizeof(username)) != 0 ||
@@ -914,35 +663,50 @@ static void handle_connect_operation(int client_fd,
     }
 
     get_ip_str(client_sa, ip, sizeof(ip));
-    rc = connect_user_internal(username, ip, port);
 
-    if (rc == 0) {
-        code = 0;
-        if (send_byte_code(client_fd, code) != 0) {
-            printf("s> CONNECT %s FAIL\n", username);
-            fflush(stdout);
-            return;
-        }
+    pthread_mutex_lock(&g_users_mutex);
 
-        printf("s> CONNECT %s OK\n", username);
+    user = find_user_locked(username);
+    if (user == NULL) {
+        rc = 1;
+    } else if (user->state == USER_CONNECTED) {
+        rc = 2;
+    } else {
+        strncpy(user->ip, ip, sizeof(user->ip) - 1);
+        user->ip[sizeof(user->ip) - 1] = '\0';
+
+        strncpy(user->port, port, sizeof(user->port) - 1);
+        user->port[sizeof(user->port) - 1] = '\0';
+
+        user->state = USER_CONNECTED;
+        rc = 0;
+    }
+
+    pthread_mutex_unlock(&g_users_mutex);
+
+    code = (uint8_t)rc;
+    if (send_byte_code(client_fd, code) != 0) {
+        printf("s> CONNECT %s FAIL\n", username);
         fflush(stdout);
-
-        try_deliver_pending_for_user(username);
         return;
     }
 
-    code = (rc == 1) ? 1 : (rc == 2 ? 2 : 3);
-    (void)send_byte_code(client_fd, code);
+    if (rc == 0) {
+        printf("s> CONNECT %s OK\n", username);
+        fflush(stdout);
 
-    printf("s> CONNECT %s FAIL\n", username);
-    fflush(stdout);
+        deliver_pending_messages_for_user(username);
+    } else {
+        printf("s> CONNECT %s FAIL\n", username);
+        fflush(stdout);
+    }
 }
 
-static void handle_disconnect_operation(int client_fd,
-                                        const struct sockaddr *client_sa) {
+static void handle_disconnect_operation(int client_fd, const struct sockaddr *client_sa) {
     char username[MAX_USERNAME];
-    char ip[MAX_IP];
-    int rc;
+    char caller_ip[MAX_IP];
+    user_t *user;
+    int rc = 3;
     uint8_t code;
 
     if (recv_cstring(client_fd, username, sizeof(username)) != 0) {
@@ -951,22 +715,38 @@ static void handle_disconnect_operation(int client_fd,
         return;
     }
 
-    get_ip_str(client_sa, ip, sizeof(ip));
-    rc = disconnect_user_internal(username, ip);
+    get_ip_str(client_sa, caller_ip, sizeof(caller_ip));
 
-    if (rc == 0) {
-        code = 0;
-        (void)send_byte_code(client_fd, code);
+    pthread_mutex_lock(&g_users_mutex);
 
-        printf("s> DISCONNECT %s OK\n", username);
+    user = find_user_locked(username);
+    if (user == NULL) {
+        rc = 1;
+    } else if (user->state != USER_CONNECTED) {
+        rc = 2;
+    } else if (strcmp(user->ip, caller_ip) != 0) {
+        rc = 3;
+    } else {
+        user->state = USER_DISCONNECTED;
+        user->ip[0] = '\0';
+        user->port[0] = '\0';
+        rc = 0;
+    }
+
+    pthread_mutex_unlock(&g_users_mutex);
+
+    code = (uint8_t)rc;
+    if (send_byte_code(client_fd, code) != 0) {
+        printf("s> DISCONNECT %s FAIL\n", username);
         fflush(stdout);
         return;
     }
 
-    code = (rc == 1) ? 1 : (rc == 2 ? 2 : 3);
-    (void)send_byte_code(client_fd, code);
-
-    printf("s> DISCONNECT %s FAIL\n", username);
+    if (rc == 0) {
+        printf("s> DISCONNECT %s OK\n", username);
+    } else {
+        printf("s> DISCONNECT %s FAIL\n", username);
+    }
     fflush(stdout);
 }
 
@@ -974,16 +754,12 @@ static void handle_send_operation(int client_fd) {
     char sender_name[MAX_USERNAME];
     char receiver_name[MAX_USERNAME];
     char text[MAX_MESSAGE_LEN];
-
-    unsigned int assigned_id = 0;
-    bool receiver_connected = false;
+    user_t *sender;
+    user_t *receiver;
+    unsigned int msg_id = 0;
+    int receiver_connected = 0;
     char receiver_ip[MAX_IP];
     char receiver_port[MAX_PORT_STR];
-    bool sender_ack_connected = false;
-    char sender_ack_ip[MAX_IP];
-    char sender_ack_port[MAX_PORT_STR];
-
-    int rc;
     uint8_t code;
 
     if (recv_cstring(client_fd, sender_name, sizeof(sender_name)) != 0 ||
@@ -994,153 +770,215 @@ static void handle_send_operation(int client_fd) {
         return;
     }
 
-    rc = handle_send_store(sender_name,
-                           receiver_name,
-                           text,
-                           &assigned_id,
-                           &receiver_connected,
-                           receiver_ip,
-                           sizeof(receiver_ip),
-                           receiver_port,
-                           sizeof(receiver_port),
-                           &sender_ack_connected,
-                           sender_ack_ip,
-                           sizeof(sender_ack_ip),
-                           sender_ack_port,
-                           sizeof(sender_ack_port));
-
-    if (rc == 1) {
-        code = 1;
-        (void)send_byte_code(client_fd, code);
-        printf("s> SEND MESSAGE %u FROM %s TO %s FAIL\n", assigned_id, sender_name, receiver_name);
-        fflush(stdout);
-        return;
-    }
-
-    if (rc != 0) {
-        code = 2;
-        (void)send_byte_code(client_fd, code);
-        printf("s> SEND MESSAGE %u FROM %s TO %s FAIL\n", assigned_id, sender_name, receiver_name);
-        fflush(stdout);
-        return;
-    }
-
-    code = 0;
-    if (send_byte_code(client_fd, code) != 0 ||
-        send_uint_as_cstring(client_fd, assigned_id) != 0) {
-        printf("s> SEND MESSAGE %u FROM %s TO %s FAIL\n", assigned_id, sender_name, receiver_name);
-        fflush(stdout);
-        return;
-    }
-
-    if (!receiver_connected) {
-        printf("s> MESSAGE %u FROM %s TO %s STORED\n", assigned_id, sender_name, receiver_name);
-        fflush(stdout);
-        return;
-    }
-
-    if (deliver_message_to_user(receiver_ip, receiver_port, sender_name, assigned_id, text) != 0) {
-        mark_user_disconnected_internal(receiver_name);
-        printf("s> MESSAGE %u FROM %s TO %s STORED\n", assigned_id, sender_name, receiver_name);
-        fflush(stdout);
-        return;
-    }
-
-    pthread_mutex_lock(&g_users_mutex);
-    {
-        user_t *receiver = find_user_locked(receiver_name);
-        if (receiver != NULL) {
-            remove_pending_message_by_key(receiver, sender_name, assigned_id, text);
-        }
-    }
-    pthread_mutex_unlock(&g_users_mutex);
-
-    printf("s> SEND MESSAGE %u FROM %s TO %s\n", assigned_id, sender_name, receiver_name);
-    fflush(stdout);
-
-    if (sender_ack_connected) {
-        (void)send_ack_to_sender(sender_ack_ip, sender_ack_port, assigned_id);
-    }
-}
-
-static void handle_users_operation(int client_fd) {
-    char username[MAX_USERNAME];
-    user_t *requester;
-    uint8_t code;
-    char **names = NULL;
-    int count = 0;
-    int i;
-    char count_str[32];
-
-    /*
-     * IMPORTANTE:
-     * aquí asumimos que el cliente manda también el username
-     * después de "USERS"
-     */
-    if (recv_cstring(client_fd, username, sizeof(username)) != 0) {
-        code = 2;
-        (void)send_byte_code(client_fd, code);
-        return;
-    }
-
     pthread_mutex_lock(&g_users_mutex);
 
-    requester = find_user_locked(username);
-    if (requester == NULL) {
-        pthread_mutex_unlock(&g_users_mutex);
-        code = 2;
-        (void)send_byte_code(client_fd, code);
-        printf("s> CONNECTEDUSERS FAIL\n");
-        fflush(stdout);
-        return;
-    }
+    sender = find_user_locked(sender_name);
+    receiver = find_user_locked(receiver_name);
 
-    if (requester->state != USER_CONNECTED) {
+    if (sender == NULL || receiver == NULL) {
         pthread_mutex_unlock(&g_users_mutex);
         code = 1;
         (void)send_byte_code(client_fd, code);
-        printf("s> CONNECTEDUSERS FAIL\n");
-        fflush(stdout);
         return;
     }
 
-    if (fill_connected_users_locked(&names, &count) != 0) {
+    if (sender->state != USER_CONNECTED) {
         pthread_mutex_unlock(&g_users_mutex);
         code = 2;
         (void)send_byte_code(client_fd, code);
-        printf("s> CONNECTEDUSERS FAIL\n");
-        fflush(stdout);
         return;
+    }
+
+    msg_id = next_message_id_for_sender(sender);
+
+    if (add_pending_message_locked(receiver, sender_name, msg_id, text) != 0) {
+        pthread_mutex_unlock(&g_users_mutex);
+        code = 2;
+        (void)send_byte_code(client_fd, code);
+        return;
+    }
+
+    if (receiver->state == USER_CONNECTED) {
+        receiver_connected = 1;
+        strncpy(receiver_ip, receiver->ip, sizeof(receiver_ip) - 1);
+        receiver_ip[sizeof(receiver_ip) - 1] = '\0';
+
+        strncpy(receiver_port, receiver->port, sizeof(receiver_port) - 1);
+        receiver_port[sizeof(receiver_port) - 1] = '\0';
     }
 
     pthread_mutex_unlock(&g_users_mutex);
 
     code = 0;
     if (send_byte_code(client_fd, code) != 0) {
-        free_name_array(names, count);
+        return;
+    }
+
+    {
+        char id_str[32];
+        snprintf(id_str, sizeof(id_str), "%u", msg_id);
+        if (send_cstring(client_fd, id_str) != 0) {
+            return;
+        }
+    }
+
+    if (receiver_connected) {
+        if (deliver_message_to_endpoint(receiver_ip, receiver_port, sender_name, msg_id, text) == 0) {
+            pthread_mutex_lock(&g_users_mutex);
+
+            receiver = find_user_locked(receiver_name);
+            if (receiver != NULL) {
+                (void)remove_pending_message_locked(receiver, msg_id, sender_name);
+            }
+
+            pthread_mutex_unlock(&g_users_mutex);
+
+            printf("s> SEND MESSAGE %u FROM %s TO %s\n", msg_id, sender_name, receiver_name);
+            fflush(stdout);
+
+            send_ack_to_sender_if_connected(sender_name, msg_id);
+        } else {
+            pthread_mutex_lock(&g_users_mutex);
+
+            receiver = find_user_locked(receiver_name);
+            if (receiver != NULL) {
+                receiver->state = USER_DISCONNECTED;
+                receiver->ip[0] = '\0';
+                receiver->port[0] = '\0';
+            }
+
+            pthread_mutex_unlock(&g_users_mutex);
+
+            printf("s> MESSAGE %u FROM %s TO %s STORED\n", msg_id, sender_name, receiver_name);
+            fflush(stdout);
+        }
+    } else {
+        printf("s> MESSAGE %u FROM %s TO %s STORED\n", msg_id, sender_name, receiver_name);
+        fflush(stdout);
+    }
+}
+
+static void handle_users_operation(int client_fd) {
+    char requester[MAX_USERNAME];
+    user_t *user;
+    int connected_count = 0;
+    user_t *curr;
+    char **names = NULL;
+    int idx = 0;
+    uint8_t code;
+    char count_str[32];
+
+    if (recv_cstring(client_fd, requester, sizeof(requester)) != 0) {
+        code = 2;
+        (void)send_byte_code(client_fd, code);
         printf("s> CONNECTEDUSERS FAIL\n");
         fflush(stdout);
         return;
     }
 
-    snprintf(count_str, sizeof(count_str), "%d", count);
+    pthread_mutex_lock(&g_users_mutex);
+
+    user = find_user_locked(requester);
+    if (user == NULL) {
+        pthread_mutex_unlock(&g_users_mutex);
+        code = 2;
+        (void)send_byte_code(client_fd, code);
+        printf("s> CONNECTEDUSERS FAIL\n");
+        fflush(stdout);
+        return;
+    }
+
+    if (user->state != USER_CONNECTED) {
+        pthread_mutex_unlock(&g_users_mutex);
+        code = 1;
+        (void)send_byte_code(client_fd, code);
+        printf("s> CONNECTEDUSERS FAIL\n");
+        fflush(stdout);
+        return;
+    }
+
+    for (curr = g_users; curr != NULL; curr = curr->next) {
+        if (curr->state == USER_CONNECTED) {
+            connected_count++;
+        }
+    }
+
+    if (connected_count > 0) {
+        names = (char **)malloc((size_t)connected_count * sizeof(char *));
+        if (names == NULL) {
+            pthread_mutex_unlock(&g_users_mutex);
+            code = 2;
+            (void)send_byte_code(client_fd, code);
+            printf("s> CONNECTEDUSERS FAIL\n");
+            fflush(stdout);
+            return;
+        }
+
+        for (curr = g_users; curr != NULL; curr = curr->next) {
+            if (curr->state == USER_CONNECTED) {
+                names[idx] = (char *)malloc(strlen(curr->username) + 1);
+                if (names[idx] == NULL) {
+                    int j;
+                    for (j = 0; j < idx; ++j) {
+                        free(names[j]);
+                    }
+                    free(names);
+                    pthread_mutex_unlock(&g_users_mutex);
+                    code = 2;
+                    (void)send_byte_code(client_fd, code);
+                    printf("s> CONNECTEDUSERS FAIL\n");
+                    fflush(stdout);
+                    return;
+                }
+                strcpy(names[idx], curr->username);
+                idx++;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&g_users_mutex);
+
+    code = 0;
+    if (send_byte_code(client_fd, code) != 0) {
+        int j;
+        for (j = 0; j < connected_count; ++j) {
+            free(names[j]);
+        }
+        free(names);
+        printf("s> CONNECTEDUSERS FAIL\n");
+        fflush(stdout);
+        return;
+    }
+
+    snprintf(count_str, sizeof(count_str), "%d", connected_count);
     if (send_cstring(client_fd, count_str) != 0) {
-        free_name_array(names, count);
+        int j;
+        for (j = 0; j < connected_count; ++j) {
+            free(names[j]);
+        }
+        free(names);
         printf("s> CONNECTEDUSERS FAIL\n");
         fflush(stdout);
         return;
     }
 
-    for (i = 0; i < count; ++i) {
-        if (send_cstring(client_fd, names[i]) != 0) {
-            free_name_array(names, count);
+    for (idx = 0; idx < connected_count; ++idx) {
+        if (send_cstring(client_fd, names[idx]) != 0) {
+            int j;
+            for (j = 0; j < connected_count; ++j) {
+                free(names[j]);
+            }
+            free(names);
             printf("s> CONNECTEDUSERS FAIL\n");
             fflush(stdout);
             return;
         }
     }
 
-    free_name_array(names, count);
+    for (idx = 0; idx < connected_count; ++idx) {
+        free(names[idx]);
+    }
+    free(names);
 
     printf("s> CONNECTEDUSERS OK\n");
     fflush(stdout);
@@ -1153,7 +991,7 @@ static void handle_users_operation(int client_fd) {
 static void *client_thread_main(void *arg) {
     client_thread_arg_t *thread_arg = (client_thread_arg_t *)arg;
     int client_fd;
-    char operation[MAX_OPERATION_LEN];
+    char operation[MAX_OPERATION];
 
     if (thread_arg == NULL) {
         return NULL;
@@ -1184,16 +1022,13 @@ static void *client_thread_main(void *arg) {
         (void)send_byte_code(client_fd, code);
     }
 
-    if (client_fd != -1) {
-        close(client_fd);
-    }
-
+    close(client_fd);
     free(thread_arg);
     return NULL;
 }
 
 /* ===========================
- * Socket servidor
+ * Servidor TCP
  * =========================== */
 
 static int create_server_socket(const char *port_str) {
