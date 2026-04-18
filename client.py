@@ -83,7 +83,7 @@ class client:
                         print(message)
                         print("END")
 
-                elif op == "SEND MESS_ACK":
+                elif op == "SEND MESS ACK":
                     msg_id = client._recv_cstring(conn)
                     with client._print_lock:
                         print(f"c> SEND MESSAGE {msg_id} OK")
