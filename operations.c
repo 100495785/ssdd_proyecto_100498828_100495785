@@ -1,5 +1,9 @@
 #include "server_common.h"
 
+/* Atiende la operación REGISTER.
+ * Recibe el nombre de usuario, registra al usuario si no existe
+ * y devuelve al cliente el código de resultado correspondiente.
+ */
 void handle_register_operation(int client_fd) {
     char username[MAX_USERNAME];
     int rc;
@@ -163,6 +167,11 @@ void handle_disconnect_operation(int client_fd, const struct sockaddr *client_sa
     fflush(stdout);
 }
 
+/* Atiende SEND y SENDATTACH.
+ * Recibe remitente, destinatario, mensaje y opcionalmente fichero.
+ * Asigna un identificador al mensaje, lo almacena como pendiente
+ * y, si el destinatario está conectado, intenta entregarlo inmediatamente.
+ */
 void handle_send_common(int client_fd, int has_attach) {
     char sender_name[MAX_USERNAME];
     char receiver_name[MAX_USERNAME];
@@ -291,6 +300,11 @@ void handle_send_common(int client_fd, int has_attach) {
     }
 }
 
+/* Atiende la operación USERS.
+ * Comprueba que el solicitante existe y está conectado.
+ * Devuelve el número de usuarios conectados y, para cada uno,
+ * su nombre, IP y puerto en el formato requerido por la parte B.
+ */
 void handle_users_operation(int client_fd) {
     char requester[MAX_USERNAME];
     user_t *user;

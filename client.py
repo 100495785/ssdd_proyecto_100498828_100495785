@@ -4,6 +4,7 @@ import argparse
 import socket
 import threading
 import os
+import sys
 
 
 class client:
@@ -372,6 +373,7 @@ class client:
         except Exception:
             client._stop_listener_thread()
             client._connected_user = None
+            client._connected_users_info.clear()
             print("c> DISCONNECT FAIL")
             return client.RC.ERROR
 
@@ -465,12 +467,16 @@ class client:
     @staticmethod
     def getFile(user, remote_file_name, local_file_name):
         try:
+            if client._connected_user is None:
+                print("c> FILE TRANSFER FAILED, user not connected.")
+                return client.RC.USER_ERROR
+
             if user not in client._connected_users_info:
                 client._refresh_users_cache(print_output=False)
 
-            if user not in client._connected_users_info:
-                print("c> FILE TRANSFER FAILED, user not connected.")
-                return client.RC.USER_ERROR
+                if user not in client._connected_users_info:
+                    print("c> FILE TRANSFER FAILED, user not connected.")
+                    return client.RC.USER_ERROR
 
             ip, port = client._connected_users_info[user]
 
@@ -569,8 +575,8 @@ class client:
 
             except KeyboardInterrupt:
                 if client._connected_user is not None:
-                    client._stop_listener_thread()
-                    client._connected_user = None
+                    user_to_disconnect = client._connected_user
+                    client.disconnect(user_to_disconnect)
                 print("\n[INFO] Cerrando cliente (Ctrl+C)...")
                 break
             except Exception as e:
@@ -611,4 +617,4 @@ class client:
 
 
 if __name__ == "__main__":
-    client.main([])
+    client.main(sys.argv[1:])

@@ -1,10 +1,9 @@
 #include "server_common.h"
 
-int deliver_message_to_endpoint(const char *ip,
-                                const char *port,
-                                const char *sender,
-                                unsigned int msg_id,
-                                const char *text,
+/* Envía un mensaje desde el servidor al hilo de escucha de un cliente.
+ * Usa el protocolo SEND MESSAGE o SEND MESSAGE ATTACH según corresponda.
+ */
+int deliver_message_to_endpoint(const char *ip, const char *port, const char *sender, unsigned int msg_id, const char *text,
                                 int has_attach,
                                 const char *filename) {
     int fd;
@@ -40,6 +39,9 @@ int deliver_message_to_endpoint(const char *ip,
     return 0;
 }
 
+/* Notifica al remitente que uno de sus mensajes ha sido entregado.
+ * Si el remitente ya no está conectado, la confirmación se descarta.
+ */
 void send_ack_to_sender_if_connected(const char *sender_name,
                                      unsigned int msg_id,
                                      int has_attach,
@@ -85,6 +87,9 @@ void send_ack_to_sender_if_connected(const char *sender_name,
     close(fd);
 }
 
+/* Entrega todos los mensajes pendientes de un usuario cuando se conecta.
+ * Cada mensaje entregado correctamente se elimina de la cola de pendientes.
+ */
 void deliver_pending_messages_for_user(const char *username) {
     while (1) {
         user_t *user;

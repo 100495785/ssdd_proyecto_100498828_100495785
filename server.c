@@ -5,6 +5,10 @@ pthread_mutex_t g_users_mutex = PTHREAD_MUTEX_INITIALIZER;
 volatile sig_atomic_t g_stop = 0;
 int g_listen_fd = -1;
 
+/* Manejador de SIGINT: permite cerrar el servidor de forma controlada
+ * cuando el usuario pulsa Ctrl+C. Cierra el socket de escucha para
+ * desbloquear accept() y terminar el bucle principal.
+ */
 static void handle_sigint(int sig) {
     (void)sig;
     g_stop = 1;
@@ -15,6 +19,10 @@ static void handle_sigint(int sig) {
     }
 }
 
+/* Función ejecutada por cada hilo de atención a cliente.
+ * Lee la operación recibida por el socket y delega el tratamiento
+ * en la función correspondiente.
+ */
 static void *client_thread_main(void *arg) {
     client_thread_arg_t *thread_arg = (client_thread_arg_t *)arg;
     int client_fd;
@@ -56,6 +64,9 @@ static void *client_thread_main(void *arg) {
     return NULL;
 }
 
+/* Crea el socket TCP del servidor, lo asocia al puerto indicado
+ * y lo deja escuchando conexiones entrantes.
+ */
 static int create_server_socket(const char *port_str) {
     struct addrinfo hints;
     struct addrinfo *result = NULL;
