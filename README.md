@@ -2,7 +2,6 @@
 =========================================
 
 ## 1. Compilación
---------------
 
 Para compilar la parte desarrollada en C, situarse en el directorio donde se encuentran los ficheros fuente y ejecutar:
 
@@ -19,9 +18,8 @@ logger_server
 El ejecutable server corresponde al servidor principal de mensajería.
 El ejecutable logger_server corresponde al servidor RPC encargado de registrar las operaciones realizadas por los usuarios.
 
-
-## 2. Despliegue del servicio web
 ------------------------------
+## 2. Despliegue del servicio web
 
 El servicio web debe ejecutarse en la misma máquina donde se ejecute cada cliente, ya que el cliente accede a él mediante localhost.
 
@@ -35,9 +33,8 @@ http://localhost:5000
 
 Este proceso se encarga de normalizar los mensajes antes de enviarlos, eliminando espacios en blanco repetidos.
 
-
-## 3. Despliegue del servidor RPC
 ------------------------------
+## 3. Despliegue del servidor RPC
 
 Antes de ejecutar el servidor RPC, debe estar activo el servicio rpcbind en la máquina donde se lance logger_server.
 
@@ -47,9 +44,8 @@ Para arrancar el servidor RPC, ejecutar en otra terminal:
 
 Este proceso queda esperando peticiones RPC del servidor principal e imprime por pantalla las operaciones realizadas por los usuarios.
 
-
+------------------------------
 ## 4. Despliegue del servidor principal
-------------------------------------
 
 El servidor principal necesita conocer la dirección IP o el nombre de la máquina donde se ejecuta el servidor RPC. Para ello se utiliza la variable de entorno LOG_RPC_IP.
 
@@ -68,9 +64,8 @@ export LOG_RPC_IP=localhost
 
 El servidor principal queda escuchando conexiones TCP de los clientes en el puerto indicado.
 
-
+------------------------------
 ## 5. Despliegue de los clientes
------------------------------
 
 Para ejecutar un cliente, debe indicarse la IP o nombre de la máquina donde se ejecuta el servidor principal y el puerto utilizado por dicho servidor.
 
@@ -86,7 +81,7 @@ Si el servidor principal se ejecuta en otra máquina o contenedor, sustituir loc
 
 python3 client.py -s <IP_SERVIDOR_PRINCIPAL> -p 8888
 
-
+------------------------------
 ## 6. Orden recomendado de ejecución
 
 Para desplegar correctamente toda la aplicación, se recomienda ejecutar los procesos en el siguiente orden:
@@ -114,7 +109,7 @@ python3 web_service.py
 
 Además, los clientes deben conectarse usando la IP real de la máquina donde se ejecuta el servidor principal.
 
-
+------------------------------
 ## 7. Ejecución en varias máquinas
 
 Si los procesos se despliegan en máquinas distintos:
@@ -138,15 +133,17 @@ python3 client.py -s <IP_SERVIDOR_PRINCIPAL> -p <PUERTO>
 
 Para que la transferencia de ficheros funcione correctamente, los clientes deben poder conectarse entre sí mediante las IP y puertos que devuelve la operación USERS.
 
-
+------------------------------
 ## 8. Limpieza
 
 Para eliminar los ejecutables, ficheros objeto y ficheros generados automáticamente por rpcgen, ejecutar:
 
 make clean
 
+------------------------------
+## 9. Resumen
 
-## 9. Resumen compilación
+### Compilación
 
 make clean
 make
@@ -167,3 +164,7 @@ export LOG_RPC_IP=localhost
 ### Terminal 4: cliente
 
 python3 client.py -s localhost -p 8888
+
+### Limpieza
+
+make clean
