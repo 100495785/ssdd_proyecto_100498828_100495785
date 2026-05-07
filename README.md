@@ -88,7 +88,6 @@ python3 client.py -s <IP_SERVIDOR_PRINCIPAL> -p 8888
 
 
 ## 6. Orden recomendado de ejecución
----------------------------------
 
 Para desplegar correctamente toda la aplicación, se recomienda ejecutar los procesos en el siguiente orden:
 
@@ -117,7 +116,6 @@ Además, los clientes deben conectarse usando la IP real de la máquina donde se
 
 
 ## 7. Ejecución en varias máquinas
-----------------------------------------------
 
 Si los procesos se despliegan en máquinas distintos:
 
@@ -142,7 +140,6 @@ Para que la transferencia de ficheros funcione correctamente, los clientes deben
 
 
 ## 8. Limpieza
------------
 
 Para eliminar los ejecutables, ficheros objeto y ficheros generados automáticamente por rpcgen, ejecutar:
 
@@ -154,19 +151,19 @@ make clean
 make clean
 make
 
-# Terminal 1: servicio web
+### Terminal 1: servicio web
 
 python3 web_service.py
 
-# Terminal 2: servidor RPC
+### Terminal 2: servidor RPC
 
 ./logger_server
 
-# Terminal 3: servidor principal
+### Terminal 3: servidor principal
 
 export LOG_RPC_IP=localhost
 ./server -p 8888
 
-# Terminal 4: cliente
+### Terminal 4: cliente
 
 python3 client.py -s localhost -p 8888
