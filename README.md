@@ -1,5 +1,4 @@
 # Compilación y despliegue de la aplicación
-=========================================
 
 ## 1. Compilación
 
