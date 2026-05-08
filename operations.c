@@ -218,6 +218,8 @@ void handle_send_common(int client_fd, int has_attach) {
         pthread_mutex_unlock(&g_users_mutex);
         code = 1;
         (void)send_byte_code(client_fd, code);
+        printf("s> SEND MESSAGE FROM %s TO %s FAIL\n", sender_name, receiver_name);
+        fflush(stdout);
         return;
     }
 
@@ -225,16 +227,20 @@ void handle_send_common(int client_fd, int has_attach) {
         pthread_mutex_unlock(&g_users_mutex);
         code = 2;
         (void)send_byte_code(client_fd, code);
+        printf("s> SEND MESSAGE FROM %s TO %s FAIL\n", sender_name, receiver_name);
+        fflush(stdout);
         return;
     }
 
     msg_id = next_message_id_for_sender(sender);
 
     if (add_pending_message_locked(receiver, sender_name, msg_id, text,
-                                   has_attach, filename) != 0) {
+                               has_attach, filename) != 0) {
         pthread_mutex_unlock(&g_users_mutex);
         code = 2;
         (void)send_byte_code(client_fd, code);
+        printf("s> SEND MESSAGE FROM %s TO %s FAIL\n", sender_name, receiver_name);
+        fflush(stdout);
         return;
     }
 
